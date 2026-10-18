@@ -1,0 +1,6 @@
+starlette>=0.40
+uvicorn>=0.30
+python-multipart>=0.0.9
+pypdf>=4.0
+requests>=2.31
+rapidfuzz>=3.6
