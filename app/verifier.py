@@ -30,10 +30,10 @@ FUZZY_THRESHOLD = 90      # percent similarity needed for a fuzzy match
 MIN_QUOTE_WORDS = 3       # shorter "quotes" are not meaningful evidence
 
 _CHAR_MAP = {
-    "‘": "'", "’": "'", "‚": "'", "‛": "'",
-    "“": '"', "”": '"', "„": '"',
-    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-",
-    "­": "",  # soft hyphen
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+    "\u00ad": "",  # soft hyphen
 }
 
 NUMBER_WORDS = {
@@ -82,9 +82,9 @@ def normalize(text: str) -> str:
 def clean_quote(quote: str | None) -> str:
     """Strip wrapper quote marks and leading/trailing ellipses the model adds."""
     q = (quote or "").strip()
-    q = q.strip("\"'“”‘’ ")
-    q = re.sub(r"^(\.{3}|…)+\s*", "", q)
-    q = re.sub(r"\s*(\.{3}|…)+$", "", q)
+    q = q.strip("\"'\u201c\u201d\u2018\u2019 ")
+    q = re.sub(r"^(\.{3}|\u2026)+\s*", "", q)
+    q = re.sub(r"\s*(\.{3}|\u2026)+$", "", q)
     return q.strip()
 
 
@@ -156,6 +156,27 @@ class DocIndex:
         a, b = max(0, start - pad), min(len(self.document), end + pad)
         return self.document[a:b]
 
+    def search_terms(self, terms: list[str], max_terms: int = 12) -> dict:
+        """Look for any of the given words in the document (prefix match, so
+        'matern' finds 'maternity'). Used to check claims like 'the document
+        does not mention X'. Returns the terms searched and every hit."""
+        cleaned: list[str] = []
+        for t in terms or []:
+            t = normalize(str(t))
+            if len(t) >= 3 and t not in cleaned:
+                cleaned.append(t)
+        cleaned = cleaned[:max_terms]
+        hits = []
+        for t in cleaned:
+            for m in re.finditer(r"\b" + re.escape(t) + r"\w*", self.norm):
+                hits.append({
+                    "term": t,
+                    "start": self.idx[m.start()],
+                    "end": self.idx[m.end() - 1] + 1,
+                })
+        hits.sort(key=lambda h: h["start"])
+        return {"terms": cleaned, "count": len(hits), "hits": hits}
+
     # -- internals ------------------------------------------------------
     def _match(self, status: str, ns: int, ne: int, score: float) -> Match:
         start = self.idx[ns]
@@ -209,17 +230,24 @@ class DocIndex:
 
 
 def trust_score(claims: list[dict]) -> dict:
-    """Summarise verification results as a 0-100 score plus counts.
-
-    A claim counts fully if its quote matched exactly and (when checked) the
-    quote supports it, 0.9 if it matched fuzzily, and 0 if it is unsupported
-    or retracted. The score is the weighted share of all claims."""
-    total = len(claims)
-    supported = sum(1 for c in claims if c["status"] == "supported")
-    unsupported = sum(1 for c in claims if c["status"] == "unsupported")
-    retracted = sum(1 for c in claims if c["status"] == "retracted")
-    weight = sum((1.0 if c["match"] == "exact" else 0.9)
-                 for c in claims if c["status"] == "supported")
-    score = round(100 * weight / total) if total else 0
+    """0-100 score over claims that rest on a quote. Verified-absent claims
+    ('not stated in the document') have no quote, so they are counted
+    separately and left out of the score. A claim of absence that the search
+    contradicts counts as a failure. If every claim is an absence claim, the
+    score is None (shown as n/a)."""
+    absent = sum(1 for c in claims if c["status"] == "absent")
+    scored = [c for c in claims if c["status"] != "absent"]
+    total = len(scored)
+    supported = sum(1 for c in scored if c["status"] == "supported")
+    unsupported = sum(1 for c in scored if c["status"] == "unsupported")
+    retracted = sum(1 for c in scored if c["status"] == "retracted")
+    contradicted = sum(1 for c in scored if c["status"] == "contradicted")
+    weight = sum((1.0 if c.get("match") == "exact" else 0.9)
+                 for c in scored if c["status"] == "supported")
+    if total:
+        score = round(100 * weight / total)
+    else:
+        score = None if absent else 0
     return {"score": score, "supported": supported, "unsupported": unsupported,
-            "retracted": retracted, "total": total}
+            "retracted": retracted, "contradicted": contradicted,
+            "absent": absent, "total": total}
