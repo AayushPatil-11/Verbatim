@@ -4,6 +4,10 @@ optional model check -> verified answer + trust score.
 The model never grades itself on whether a quote exists: DocIndex (plain code)
 decides that. The optional entailment layer only judges whether a quote that
 really exists actually supports the claim.
+
+Absence claims ("the document does not mention X") have no quote to check.
+For those the model lists search terms and plain code searches the document:
+zero matches -> "absent" (verified), any match -> "contradicted".
 """
 from __future__ import annotations
 
@@ -27,7 +31,13 @@ CLAIMS_SYSTEM = (
     "- Each claim is one checkable statement (max 4-8 claims).\n"
     "- Each quote MUST be copied character-for-character from the DOCUMENT, "
     "10-40 words, containing the key facts of the claim. Never paraphrase a quote.\n"
-    "- If you cannot find a supporting passage, set the quote to an empty string."
+    "- If you cannot find a supporting passage, set the quote to an empty string.\n"
+    "- ABSENCE: if the answer says the document does not mention or does not specify "
+    "something, write that as ONE single claim (never several) in this form instead of "
+    "a quote: {\"claim\": \"The document does not mention ...\", \"type\": \"absence\", "
+    "\"terms\": [\"matern\", \"pregnan\", \"childbirth\"]}. The terms are 3 to 8 lowercase "
+    "word stems for the topic and its close synonyms, specific to the topic. Never use "
+    "generic words such as policy, cover, claim, insurance or document."
 )
 
 RETRY_SYSTEM = (
@@ -62,6 +72,16 @@ def parse_json(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _absence_terms(item: dict) -> list[str]:
+    """Return the model's search terms if this item is an absence claim."""
+    if str(item.get("type", "")).strip().lower() != "absence":
+        return []
+    terms = item.get("terms")
+    if not isinstance(terms, list):
+        return []
+    return [str(t) for t in terms if str(t).strip()]
+
+
 def run(document: str, question: str, client, entailment: bool = True) -> dict:
     notes: list[str] = []
     truncated = False
@@ -82,7 +102,7 @@ def run(document: str, question: str, client, entailment: bool = True) -> dict:
     # 1. Draft answer
     draft = call(DRAFT_SYSTEM, f"{doc_block}\n\nQUESTION: {question}", "draft").strip()
 
-    # 2. Claims with word-for-word quotes
+    # 2. Claims with word-for-word quotes (or search terms for absence claims)
     raw = parse_json(call(
         CLAIMS_SYSTEM,
         f"{doc_block}\n\nQUESTION: {question}\n\nANSWER TO BREAK DOWN:\n{draft}",
@@ -92,15 +112,40 @@ def run(document: str, question: str, client, entailment: bool = True) -> dict:
         raise PipelineError("The model produced no checkable claims for this answer.")
 
     claims = []
+    absence_seen = False
     for i, c in enumerate(items[:10], start=1):
         quote = str(c.get("quote") or "").strip()
-        m = index.find(quote)
-        claims.append({
+        cl = {
             "id": i, "claim": str(c["claim"]).strip(), "quote": quote, "retried": False,
-            "retry_quote": None, "match_obj": m, "status": None, "match": None,
-            "start": None, "end": None, "score": 0.0, "reason": "",
+            "retry_quote": None, "match_obj": None, "status": None, "match": None,
+            "start": None, "end": None, "score": 0.0, "reason": "", "search": None,
             "entailment": {"checked": False, "supported": None, "reason": ""},
-        })
+        }
+
+        terms = _absence_terms(c)
+        if terms and not absence_seen:
+            result = index.search_terms(terms)
+            if result["terms"]:
+                absence_seen = True  # only the first absence claim is searched
+                found = sorted({h["term"] for h in result["hits"]})
+                cl["search"] = {"terms": result["terms"], "count": result["count"], "found_terms": found}
+                cl["quote"] = ""
+                if result["count"] == 0:
+                    cl["status"] = "absent"
+                else:
+                    first = result["hits"][0]
+                    cl.update(
+                        status="contradicted", start=first["start"], end=first["end"],
+                        quote=index.context(first["start"], first["end"], pad=100).strip(),
+                        reason=("The model said the document does not mention this, but the "
+                                "document contains matching words: " + ", ".join(found) + "."))
+                claims.append(cl)
+                continue
+
+        cl["match_obj"] = index.find(quote)
+        claims.append(cl)
+
+    quote_claims = [c for c in claims if c["status"] is None]
 
     # 3. Layer 1 retry: ask once more for a real quote where the code found none
     def retry(cl: dict) -> None:
@@ -126,12 +171,12 @@ def run(document: str, question: str, client, entailment: bool = True) -> dict:
                 f"{cl['match_obj'].reason} On retry the model could not find any passage "
                 "that supports this claim.").strip()
 
-    failing = [c for c in claims if not c["match_obj"].found]
+    failing = [c for c in quote_claims if not c["match_obj"].found]
     if failing:
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(retry, failing))
 
-    for cl in claims:
+    for cl in quote_claims:
         m = cl["match_obj"]
         if m.found:
             cl.update(status="supported", match=m.status, start=m.start, end=m.end, score=m.score)
@@ -158,14 +203,14 @@ def run(document: str, question: str, client, entailment: bool = True) -> dict:
             notes.append(f"Support check for claim {cl['id']} returned an unreadable reply and was skipped.")
 
     if entailment:
-        to_check = [c for c in claims if c["status"] == "supported"]
+        to_check = [c for c in quote_claims if c["status"] == "supported"]
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(check, to_check))
 
     for cl in claims:
         cl.pop("match_obj", None)
 
-    ok_claims = [c["claim"] for c in claims if c["status"] == "supported"]
+    ok_claims = [c["claim"] for c in claims if c["status"] in ("supported", "absent")]
     verified = " ".join(ok_claims) if ok_claims else \
         "No claim in the draft answer could be verified against the document."
 

@@ -8,12 +8,12 @@
   :root{
     --bg:#f7f6f2; --panel:#ffffff; --ink:#1d2433; --muted:#667085; --line:#e4e1d8;
     --accent:#2f4b7c; --ok:#1f7a4d; --ok-bg:#e3f4ea; --warn:#9a6700; --warn-bg:#fff3d1;
-    --bad:#b42318; --bad-bg:#fde7e4; --hl:#fff1a8;
+    --bad:#b42318; --bad-bg:#fde7e4; --info:#1d5fa8; --info-bg:#e1eefc; --hl:#fff1a8;
   }
   @media (prefers-color-scheme: dark){
     :root{ --bg:#14171f; --panel:#1c212c; --ink:#e8eaf0; --muted:#98a2b3; --line:#2b3242;
       --accent:#8fb0ee; --ok:#6fd3a0; --ok-bg:#16332a; --warn:#f0c14b; --warn-bg:#3a3014;
-      --bad:#ff8a7d; --bad-bg:#3d1c19; --hl:#5a4d10; }
+      --bad:#ff8a7d; --bad-bg:#3d1c19; --info:#8fc2ff; --info-bg:#16283d; --hl:#5a4d10; }
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -46,20 +46,25 @@
   .pill{font-size:13px;padding:2px 9px;border-radius:99px;font-weight:600}
   .pill.supported{background:var(--ok-bg);color:var(--ok)}
   .pill.unsupported{background:var(--warn-bg);color:var(--warn)}
-  .pill.retracted{background:var(--bad-bg);color:var(--bad)}
+  .pill.retracted,.pill.contradicted{background:var(--bad-bg);color:var(--bad)}
+  .pill.absent{background:var(--info-bg);color:var(--info)}
   .answer{white-space:pre-wrap}
   .vclaim{display:inline;padding:1px 2px;border-radius:4px}
   .vclaim.supported{background:var(--ok-bg)}
   .vclaim.unsupported{background:var(--warn-bg)}
-  .vclaim.retracted{background:var(--bad-bg);text-decoration:line-through;color:var(--muted)}
+  .vclaim.absent{background:var(--info-bg)}
+  .vclaim.retracted,.vclaim.contradicted{background:var(--bad-bg);text-decoration:line-through;color:var(--muted)}
   .chip{display:inline-block;font-size:12px;font-weight:700;margin:0 4px 0 2px;padding:0 6px;border-radius:99px;background:var(--accent);color:#fff;cursor:pointer;text-decoration:none;vertical-align:1px}
   .claim{border:1px solid var(--line);border-left-width:5px;border-radius:8px;padding:10px 12px;margin-bottom:10px;cursor:pointer}
-  .claim.supported{border-left-color:var(--ok)} .claim.unsupported{border-left-color:var(--warn)} .claim.retracted{border-left-color:var(--bad)}
+  .claim.supported{border-left-color:var(--ok)} .claim.unsupported{border-left-color:var(--warn)}
+  .claim.retracted,.claim.contradicted{border-left-color:var(--bad)} .claim.absent{border-left-color:var(--info)}
   .claim.active{outline:2px solid var(--accent)}
   .claim .head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-  .claim .text.retracted{text-decoration:line-through;color:var(--muted)}
+  .claim .text.retracted,.claim .text.contradicted{text-decoration:line-through;color:var(--muted)}
   blockquote{margin:8px 0 0;padding:6px 10px;border-left:3px solid var(--line);background:var(--bg);font-size:14px;border-radius:0 6px 6px 0;word-break:break-word}
   .why{font-size:14px;margin-top:6px}
+  .terms{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .term{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:1px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--line)}
   .doc{white-space:pre-wrap;max-height:520px;overflow:auto;font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--bg)}
   mark{background:var(--hl);color:inherit;border-radius:3px;padding:1px 0;cursor:pointer}
   mark.active{outline:2px solid var(--accent)}
@@ -143,7 +148,10 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const LABEL = {supported:"Supported", unsupported:"Unsupported", retracted:"Retracted"};
+const LABEL = {supported:"Supported", unsupported:"Unsupported", retracted:"Retracted",
+               absent:"Verified: not stated in the document", contradicted:"Contradicted"};
+const PILL = {supported:"supported", unsupported:"unsupported", retracted:"retracted",
+              absent:"not stated", contradicted:"contradicted"};
 let current = null;
 
 function el(tag, cls, text){
@@ -196,22 +204,36 @@ function render(d){
   current = d;
   $("results").classList.remove("hidden");
   const t = d.trust;
-  const color = t.score >= 75 ? "var(--ok)" : t.score >= 40 ? "var(--warn)" : "var(--bad)";
-  $("ring").style.setProperty("--p", t.score); $("ring").style.setProperty("--c", color);
-  $("scoreNum").textContent = t.score;
-  $("scoreText").textContent = `${t.supported} of ${t.total} claims verified against the document` +
-    (d.entailment_enabled ? "" : " (quote existence only)");
+  const absent = t.absent || 0, contradicted = t.contradicted || 0;
+  const hasScore = typeof t.score === "number";
+
+  if(hasScore){
+    const color = t.score >= 75 ? "var(--ok)" : t.score >= 40 ? "var(--warn)" : "var(--bad)";
+    $("ring").style.setProperty("--p", t.score); $("ring").style.setProperty("--c", color);
+    $("scoreNum").textContent = t.score;
+    $("scoreText").textContent = `${t.supported} of ${t.total} claims verified against the document` +
+      (d.entailment_enabled ? "" : " (quote existence only)") +
+      (absent ? `, plus ${absent} verified as not stated` : "");
+  } else {
+    $("ring").style.setProperty("--p", 0); $("ring").style.setProperty("--c", "var(--info)");
+    $("scoreNum").textContent = "n/a";
+    $("scoreText").textContent = "Nothing to score: the document does not cover this, and a code search confirmed it. See the terms searched below.";
+  }
+
   const pills = $("pills"); pills.replaceChildren();
-  [["supported", t.supported], ["unsupported", t.unsupported], ["retracted", t.retracted]].forEach(([k, n]) => {
-    pills.appendChild(el("span", "pill " + k, `${n} ${LABEL[k].toLowerCase()}`));
+  [["supported", t.supported], ["unsupported", t.unsupported], ["retracted", t.retracted],
+   ["contradicted", contradicted], ["absent", absent]].forEach(([k, n]) => {
+    if(n > 0 || ["supported", "unsupported", "retracted"].includes(k))
+      pills.appendChild(el("span", "pill " + k, `${n} ${PILL[k]}`));
   });
+
   const notes = $("notes"); notes.replaceChildren();
   (d.notes || []).forEach(n => notes.appendChild(el("div", "banner info", n)));
   if(d.provider) notes.appendChild(el("div", "muted small", `Model: ${d.model} via ${d.provider}` + (d.cached ? " (cached result)" : "")));
 
   $("draft").textContent = d.draft_answer;
 
-  // Verified answer: every claim shown, retracted ones struck through
+  // Verified answer: every claim shown, failed ones struck through
   const v = $("verified"); v.replaceChildren();
   d.claims.forEach((c) => {
     const span = el("span", "vclaim " + c.status, c.claim + " ");
@@ -220,8 +242,11 @@ function render(d){
       const chip = el("a", "chip", String(c.id)); chip.href = "#"; chip.title = "Show evidence";
       chip.onclick = (ev) => { ev.preventDefault(); activate(c.id, true); };
       v.appendChild(chip);
+    } else if(c.status === "absent"){
+      v.appendChild(el("span", "muted small", "[verified: not stated in the document] "));
     } else {
-      v.appendChild(el("span", "muted small", c.status === "retracted" ? "[retracted] " : "[unsupported] "));
+      const tag = c.status === "retracted" ? "[retracted] " : c.status === "contradicted" ? "[contradicted] " : "[unsupported] ";
+      v.appendChild(el("span", "muted small", tag));
     }
     v.appendChild(document.createTextNode(" "));
   });
@@ -232,23 +257,35 @@ function render(d){
     const box = el("div", "claim " + c.status); box.id = "claim-" + c.id;
     box.onclick = () => activate(c.id, true);
     const head = el("div", "head");
-    head.appendChild(el("span", "pill " + c.status, LABEL[c.status]));
+    head.appendChild(el("span", "pill " + c.status, LABEL[c.status] || c.status));
     head.appendChild(el("span", "text " + c.status, `${c.id}. ${c.claim}`));
     box.appendChild(head);
-    if(c.quote){
+
+    if(c.search){
+      box.appendChild(el("div", "muted small", "Terms searched in the document:"));
+      const tw = el("div", "terms");
+      c.search.terms.forEach(x => tw.appendChild(el("span", "term", x)));
+      box.appendChild(tw);
+      box.appendChild(el("div", "why muted", `Matches found: ${c.search.count}. Absence is checked only for the terms listed.`));
+      if(c.status === "contradicted" && c.quote){
+        box.appendChild(el("div", "muted small", "Passage found in the document:"));
+        box.appendChild(el("blockquote", "", c.quote));
+      }
+    } else if(c.quote){
       const bq = el("blockquote", "", c.quote);
       box.appendChild(el("div", "muted small", c.status === "retracted" ? "Quote the model cited:" : "Evidence:"));
       box.appendChild(bq);
     } else {
       box.appendChild(el("div", "muted small", "The model gave no quote."));
     }
+
     if(c.retried && c.retry_quote && c.retry_quote !== c.quote){
       box.appendChild(el("div", "muted small", "Quote after retry:"));
       box.appendChild(el("blockquote", "", c.retry_quote));
     }
     if(c.match === "fuzzy") box.appendChild(el("div", "why muted", `Matched approximately (${c.score}% similar). Numbers and negations agree.`));
-    if(c.reason) box.appendChild(el("div", "why", "Why it failed: " + c.reason));
-    else if(c.entailment.checked) box.appendChild(el("div", "why muted", "Support check: " + (c.entailment.reason || "passes")));
+    if(c.reason) box.appendChild(el("div", "why", (c.status === "contradicted" ? "Why it failed: " : "Why it failed: ") + c.reason));
+    else if(c.entailment && c.entailment.checked) box.appendChild(el("div", "why muted", "Support check: " + (c.entailment.reason || "passes")));
     list.appendChild(box);
   });
 
@@ -282,6 +319,14 @@ function activate(id, scrollDoc){
   if(scrollDoc && marks[0]) marks[0].scrollIntoView({behavior:"smooth", block:"center"});
   if(!scrollDoc && box) box.scrollIntoView({behavior:"smooth", block:"nearest"});
 }
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !$("go").disabled) {
+    e.preventDefault();
+    $("go").click();
+  }
+});
+
+// Press Enter in the question box to ask and verify
 $("q").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !$("go").disabled) {
     e.preventDefault();
